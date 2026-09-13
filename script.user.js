@@ -1,15 +1,16 @@
 // ==UserScript==
 // @name         北交大iCalender课表生成
 // @namespace    https://github.com/ZiuChen/userscript
-// @version      1.5.1
+// @version      1.6.0
 // @description  导出ics/csv/json格式的日程文件！ 💻支持多端同步！ 📝支持Excel编辑！ 📆支持导入各系统原生日历！
-// @author       ZiuChen
+// @author       ZiuChen, ChJiang-ME
 // @match        https://aa.bjtu.edu.cn/course_selection/courseselect/stuschedule/*
 // @match        https://aa.bjtu.edu.cn/course_selection/courseselecttask/schedule/
 // @require      https://fastly.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js
 // @require      https://fastly.jsdelivr.net/gh/nwcell/ics.js@dfec67f37a3c267b3f97dd229c9b6a3521222794/demo/ics.deps.min.js
 // @icon         https://fastly.jsdelivr.net/gh/ZiuChen/ZiuChen@main/avatar.jpg
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      bksy.bjtu.edu.cn
 // @license      MIT
 // @downloadURL https://update.greasyfork.org/scripts/430918/%E5%8C%97%E4%BA%A4%E5%A4%A7iCalender%E8%AF%BE%E8%A1%A8%E7%94%9F%E6%88%90.user.js
 // @updateURL https://update.greasyfork.org/scripts/430918/%E5%8C%97%E4%BA%A4%E5%A4%A7iCalender%E8%AF%BE%E8%A1%A8%E7%94%9F%E6%88%90.meta.js
@@ -17,11 +18,24 @@
 
 "use strict"
 
-const defaultStartMonday = "2022-08-29" // 第一个教学周的第一个周一
+const defaultStartMonday = "2022-08-29" // 第一个教学周的第一个周一（校历获取失败时的兜底默认值）
 
 if (localStorage.getItem("defaultStartMonday") === null) {
   localStorage.setItem("defaultStartMonday", defaultStartMonday)
 }
+
+// 脚本自己管理的全部 localStorage key，重置设置时只清这些，不影响宿主页面自己的数据
+const OWNED_STORAGE_KEYS = ["defaultStartMonday", "selectedSemesterId", "semesterCalendarCache"]
+
+const STANDARD_TIME_TABLE = [
+  ["08:00", "09:50"],
+  ["10:10", "12:00"],
+  ["12:10", "14:00"],
+  ["14:10", "16:00"],
+  ["16:20", "18:10"],
+  ["19:00", "20:50"],
+  ["21:00", "21:50"]
+]
 
 function buttonGenerate() {
   $(".widget-title").append(/* html */ `
@@ -29,7 +43,11 @@ function buttonGenerate() {
         <button id="csvGenerate" class="btn btn-white btn-xs">导出为csv文件</button>
         <button id="jsonGenerate" class="btn btn-white btn-xs">导出为json文件</button>
         <button id="scheduleRedirect" title="点击跳转校历" class="btn btn-white btn-xs">校历</button>
-        <input id="startMonday" class="form-control" type="text" placeholder="第一个教学周的第一个周一" title="第一个教学周的第一个周一" style="height: 26px;width: 200px;display: inline;vertical-align: middle;"></input>
+        <select id="semesterSelect" class="form-control" title="用于计算课程日期的学期，默认自动选中当前学期" style="height: 26px;width: 220px;display: inline;vertical-align: middle;">
+          <option value="">校历加载中...</option>
+        </select>
+        <button id="refreshCalendar" title="重新获取校历" class="btn btn-white btn-xs">刷新校历</button>
+        <input id="startMonday" class="form-control" type="text" placeholder="校历获取失败时的手动起始周一" title="校历获取失败时的手动起始周一（兜底/覆盖）" style="height: 26px;width: 200px;display: inline;vertical-align: middle;"></input>
         <button id="restoreSetting" title="点击重置设置" class="btn btn-white btn-xs">重置</button>
         `)
   bindEvents()
@@ -56,7 +74,7 @@ function bindEvents() {
     jsonmain(pageFlag)
   })
   $("#restoreSetting").click(() => {
-    localStorage.clear()
+    OWNED_STORAGE_KEYS.forEach((key) => localStorage.removeItem(key))
     location.reload()
   })
   $("#startMonday")
@@ -64,25 +82,141 @@ function bindEvents() {
       localStorage.setItem("defaultStartMonday", e.target.value)
     })
     .val(localStorage.getItem("defaultStartMonday"))
+
+  $("#semesterSelect").change((e) => {
+    localStorage.setItem("selectedSemesterId", e.target.value)
+  })
+  $("#refreshCalendar").click(() => {
+    getSemesterCalendar(true)
+      .then((cache) => populateSemesterSelect(cache))
+      .catch((err) => alert("刷新校历失败：" + err.message))
+  })
+
+  getSemesterCalendar(false)
+    .then((cache) => populateSemesterSelect(cache))
+    .catch((err) => {
+      $("#semesterSelect").html('<option value="">校历获取失败，将使用手动起始周一</option>')
+      console.warn("[课表导出] " + err.message)
+    })
 }
 
-// generateWeekTable() @github ygowill
-function generateWeekTable() {
-  let startMondayString = $("#startMonday").val()
-  if (validCheck(startMondayString) === false) return
-  const startMonday = new Date(startMondayString)
-  let weekDateTable = []
-  for (let i = 0; i < 30; i++) {
-    // 生成到30周
-    let weekArr = []
-    for (let j = 0; j < 7; j++) {
-      let tmpDate = new Date(startMonday)
-      tmpDate.setDate(tmpDate.getDate() + 7 * i + j)
-      weekArr.push(tmpDate)
+// 从校历页面（bksy.bjtu.edu.cn）抓取全部学期的教学周日期数据
+// 页面把 2012 年至今所有学期的数据内嵌在隐藏输入框 #hidJson 里（URL编码的JSON），
+// #ddlSemTitle 下拉框的 <option> 列出所有学期，服务端会把当前学期标记为 selected
+function fetchSemesterCalendar() {
+  return new Promise((resolve, reject) => {
+    GM_xmlhttpRequest({
+      method: "GET",
+      url: "https://bksy.bjtu.edu.cn/Admin/SemesterTranPage.aspx",
+      timeout: 10000,
+      onload: (res) => {
+        try {
+          let doc = new DOMParser().parseFromString(res.responseText, "text/html")
+          let hidJson = doc.getElementById("hidJson")
+          let options = doc.querySelectorAll("#ddlSemTitle option")
+          if (!hidJson || options.length === 0) {
+            throw new Error("校历页面结构已变化，无法解析")
+          }
+          let allData = JSON.parse(decodeURIComponent(hidJson.value))
+          let semesters = []
+          for (let opt of options) {
+            let id = parseInt(opt.value, 10)
+            let entry = allData.find((d) => d.Id === id)
+            if (!entry) continue
+            let weeks = []
+            for (let col of entry.Json) {
+              let match = col.Week && col.Week.match(/^第(\d+)教学周$/)
+              if (!match) continue
+              let dtMatch = col.DT && col.DT.match(/\d+/)
+              if (!dtMatch) continue
+              weeks.push({ week: parseInt(match[1], 10), monday: parseInt(dtMatch[0], 10) })
+            }
+            semesters.push({
+              id: id,
+              name: opt.textContent.trim(),
+              selected: opt.hasAttribute("selected"),
+              weeks: weeks
+            })
+          }
+          if (semesters.length === 0) {
+            throw new Error("未解析到任何学期数据")
+          }
+          let cache = { fetchedAt: Date.now(), semesters: semesters }
+          localStorage.setItem("semesterCalendarCache", JSON.stringify(cache))
+          resolve(cache)
+        } catch (e) {
+          reject(e)
+        }
+      },
+      onerror: () => reject(new Error("获取校历失败：网络错误")),
+      ontimeout: () => reject(new Error("获取校历超时"))
+    })
+  })
+}
+
+// 24小时内优先用缓存，避免每次点击都请求校历页面
+function getSemesterCalendar(forceRefresh) {
+  if (!forceRefresh) {
+    let cacheRaw = localStorage.getItem("semesterCalendarCache")
+    if (cacheRaw) {
+      let cache = JSON.parse(cacheRaw)
+      if (Date.now() - cache.fetchedAt < 24 * 60 * 60 * 1000) {
+        return Promise.resolve(cache)
+      }
     }
-    weekDateTable.push(weekArr)
   }
-  return weekDateTable
+  return fetchSemesterCalendar()
+}
+
+function populateSemesterSelect(cache) {
+  let $sel = $("#semesterSelect")
+  $sel.empty()
+  for (let sem of cache.semesters) {
+    $sel.append(`<option value="${sem.id}">${sem.name}</option>`)
+  }
+  let savedId = localStorage.getItem("selectedSemesterId")
+  let defaultSem = cache.semesters.find((s) => s.selected)
+  let idToSelect = savedId && cache.semesters.some((s) => String(s.id) === savedId) ? savedId : defaultSem && defaultSem.id
+  if (idToSelect != null) $sel.val(idToSelect)
+}
+
+// 生成 {教学周编号: [7个Date]} 的映射。
+// 优先用当前选中学期从校历抓到的精确日期（自动跳过放假整周，无偏移）；
+// 校历数据不可用时，回退到旧的"起始周一 + 7×N天"线性推算
+function buildWeekTable() {
+  let cacheRaw = localStorage.getItem("semesterCalendarCache")
+  let cache = cacheRaw ? JSON.parse(cacheRaw) : null
+  let selectedId = $("#semesterSelect").val()
+  let semester = cache && cache.semesters.find((s) => String(s.id) === String(selectedId))
+
+  if (semester && semester.weeks.length > 0) {
+    let table = {}
+    for (let entry of semester.weeks) {
+      let days = []
+      for (let j = 0; j < 7; j++) {
+        let d = new Date(entry.monday)
+        d.setDate(d.getDate() + j)
+        days.push(d)
+      }
+      table[entry.week] = days
+    }
+    return table
+  }
+
+  let startMondayString = $("#startMonday").val()
+  if (validCheck(startMondayString) === false) return null
+  const startMonday = new Date(startMondayString)
+  let table = {}
+  for (let i = 0; i < 30; i++) {
+    let days = []
+    for (let j = 0; j < 7; j++) {
+      let d = new Date(startMonday)
+      d.setDate(d.getDate() + 7 * i + j)
+      days.push(d)
+    }
+    table[i + 1] = days
+  }
+  return table
 }
 
 function validCheck(startMondayString) {
@@ -95,19 +229,13 @@ function validCheck(startMondayString) {
   }
 }
 
-function tableTransfer(rowTable, isOrigin) {
+function tableTransfer(rowTable) {
   // 7*7行转列
   let tmpTable = []
   let columnTable = []
   for (let i = 0; i < 7; i++) {
-    if (isOrigin) {
-      for (let j = 0; j < 7; j++) {
-        tmpTable.push(rowTable[j])
-      }
-    } else {
-      for (let j = i; j < 49; j += 7) {
-        tmpTable.push(rowTable[j])
-      }
+    for (let j = i; j < 49; j += 7) {
+      tmpTable.push(rowTable[j])
     }
     columnTable[i] = tmpTable
     tmpTable = []
@@ -125,18 +253,34 @@ function removeZero(iArr) {
 function dateStr2Arr(dateStr) {
   let dateArr = []
   if (dateStr) {
-    if (dateStr.indexOf("-") != -1) {
+    if (/[-－]/.test(dateStr)) {
       // 第X-Y周
-      let indexArr = dateStr.split("-")
+      let indexArr = dateStr.split(/[-－]/)
       removeZero(indexArr)
-      for (let i = indexArr[0]; i < indexArr[1] + 1; i++) {
-        dateArr.push(i)
+      if (isNaN(indexArr[0]) || isNaN(indexArr[1])) {
+        console.warn(`[课表导出] 无法解析周次范围字符串 "${dateStr}"，已跳过`)
+      } else {
+        for (let i = indexArr[0]; i < indexArr[1] + 1; i++) {
+          dateArr.push(i)
+        }
       }
-    } else if (dateStr.indexOf(",") != -1) {
+    } else if (/[,，、]/.test(dateStr)) {
       // 单双周
-      dateArr = dateStr.split(", ")
+      dateArr = dateStr.split(/[,，、]\s*/)
       removeZero(dateArr)
-    } else dateArr.push(parseInt(dateStr, 10)) // 第X周
+      let invalidCount = dateArr.filter((n) => isNaN(n)).length
+      if (invalidCount > 0) {
+        console.warn(`[课表导出] 无法解析周次字符串 "${dateStr}"，已跳过 ${invalidCount} 项`)
+        dateArr = dateArr.filter((n) => !isNaN(n))
+      }
+    } else {
+      let singleWeek = parseInt(dateStr, 10)
+      if (isNaN(singleWeek)) {
+        console.warn(`[课表导出] 无法解析周次字符串 "${dateStr}"，已跳过`)
+      } else {
+        dateArr.push(singleWeek) // 第X周
+      }
+    }
   }
   return dateArr
 }
@@ -151,8 +295,8 @@ function dateStr2Arr(dateStr) {
 // teacher: "卜伟"
 // weekNum: 6
 
-function stuScheduleGetTable(isOrigin) {
-  let courseListTmp = tableTransfer($("tr>td[style!='height:80px;']"), isOrigin)
+function stuScheduleGetTable() {
+  let courseListTmp = tableTransfer($("tr>td[style!='height:80px;']"))
   let courseList = []
   let courseTmp = {}
   for (let i = 0; i < 7; i++) {
@@ -194,8 +338,8 @@ function stuScheduleGetTable(isOrigin) {
   return courseList
 }
 
-function scheduleGetTable(isOrigin) {
-  let courseListTmp = tableTransfer($("tr>td[style!='height:80px;']"), isOrigin)
+function scheduleGetTable() {
+  let courseListTmp = tableTransfer($("tr>td[style!='height:80px;']"))
   let courseList = []
   let courseTmp = {}
   for (let i = 0; i < 7; i++) {
@@ -237,16 +381,7 @@ function scheduleGetTable(isOrigin) {
   return courseList
 }
 
-function timeConstructor(weekTh, weekNum, courseNum, isStamp, isDelay) {
-  let standardTimeTable = [
-    ["08:00", "09:50"],
-    ["10:10", "12:00"],
-    ["12:10", "14:00"],
-    ["14:10", "16:00"],
-    ["16:20", "18:10"],
-    ["19:00", "20:50"],
-    ["21:00", "21:50"]
-  ]
+function timeConstructor(weekTable, weekTh, weekNum, courseNum, isStamp, isDelay) {
   let delayTimeTable = [
     ["08:00", "09:50"],
     ["10:30", "12:20"],
@@ -257,33 +392,21 @@ function timeConstructor(weekTh, weekNum, courseNum, isStamp, isDelay) {
     ["21:00", "21:50"]
   ]
 
-  let WeekTable = generateWeekTable()
-  let DayTime = new Date(WeekTable[weekTh - 1][weekNum - 1])
+  let DayTime = new Date(weekTable[weekTh][weekNum - 1])
   let rtnTime = []
   let startTimeStamp, endTimeStamp
-  let delayClassroom = ["思源西楼", "逸夫"]
 
-  for (let item of delayClassroom) {
-    if (isDelay.search(item) != -1) {
-      startTimeStamp = DayTime.setHours(
-        delayTimeTable[courseNum - 1][0].split(":")[0],
-        delayTimeTable[courseNum - 1][0].split(":")[1]
-      )
-      endTimeStamp = DayTime.setHours(
-        delayTimeTable[courseNum - 1][1].split(":")[0],
-        delayTimeTable[courseNum - 1][1].split(":")[1]
-      )
-    } else {
-      startTimeStamp = DayTime.setHours(
-        standardTimeTable[courseNum - 1][0].split(":")[0],
-        standardTimeTable[courseNum - 1][0].split(":")[1]
-      )
-      endTimeStamp = DayTime.setHours(
-        standardTimeTable[courseNum - 1][1].split(":")[0],
-        standardTimeTable[courseNum - 1][1].split(":")[1]
-      )
-    }
-  }
+  let isDelayed = ["思源西楼", "逸夫"].some((item) => isDelay.search(item) != -1)
+  let timeTable = isDelayed ? delayTimeTable : STANDARD_TIME_TABLE
+
+  startTimeStamp = DayTime.setHours(
+    timeTable[courseNum - 1][0].split(":")[0],
+    timeTable[courseNum - 1][0].split(":")[1]
+  )
+  endTimeStamp = DayTime.setHours(
+    timeTable[courseNum - 1][1].split(":")[0],
+    timeTable[courseNum - 1][1].split(":")[1]
+  )
 
   if (isStamp === 1) {
     rtnTime.push(startTimeStamp)
@@ -316,12 +439,13 @@ function icsConstructor(icsEventList) {
   cal.download("iCalender - 课表 - " + today)
 }
 
-function eventConstructor(courseList) {
+function eventConstructor(courseList, weekTable) {
   let icsEvent = {}
   let icsEventList = []
   for (let i = 0; i < courseList.length; i++) {
     for (let j = 0; j < courseList[i].date.length; j++) {
       let timeRst = timeConstructor(
+        weekTable,
         courseList[i].date[j],
         courseList[i].weekNum,
         courseList[i].courseNum,
@@ -329,6 +453,7 @@ function eventConstructor(courseList) {
         courseList[i].location
       )
       let timeRstStamp = timeConstructor(
+        weekTable,
         courseList[i].date[j],
         courseList[i].weekNum,
         courseList[i].courseNum,
@@ -355,15 +480,6 @@ function eventConstructor(courseList) {
 }
 
 function toExcelFormatter(courseList) {
-  let standardTimeTable = [
-    ["08:00", "09:50"],
-    ["10:10", "12:00"],
-    ["12:10", "14:00"],
-    ["14:10", "16:00"],
-    ["16:20", "18:10"],
-    ["19:00", "20:50"],
-    ["21:00", "21:50"]
-  ]
   let jsonData = [
     {
       column1: "",
@@ -436,7 +552,7 @@ function toExcelFormatter(courseList) {
     for (let j = 0; j < 7; j++) {
       let tmpKey = objKeys[j + 1]
       jsonData[i].column1 =
-        charArr[i] + " [" + standardTimeTable[i][0] + " - " + standardTimeTable[i][0] + "]"
+        charArr[i] + " [" + STANDARD_TIME_TABLE[i][0] + " - " + STANDARD_TIME_TABLE[i][1] + "]"
       for (let k = 0; k < courseList.length; k++) {
         if (courseList[k].courseNum == i + 1 && courseList[k].weekNum == j + 1) {
           jsonData[i][tmpKey] = jsonData[i][tmpKey] + "  " + courseList[k].allInfo
@@ -447,12 +563,20 @@ function toExcelFormatter(courseList) {
   return jsonData
 }
 
+// 标准 CSV 字段转义：含逗号/双引号/换行则整体加引号，内部双引号转义为两个双引号
+function csvEscape(field) {
+  if (/[",\n\r]/.test(field)) {
+    return `"${field.replace(/"/g, '""')}"`
+  }
+  return field
+}
+
 // tableToExcel() @csdn hhzzcc_
 function tableToExcel(jsonData) {
   let str = `课程|星期,星期一,星期二,星期三,星期四,星期五,星期六,星期日\n`
   for (let i = 0; i < jsonData.length; i++) {
     for (let key in jsonData[i]) {
-      str += `${jsonData[i][key] + "\t"},`
+      str += `${csvEscape(jsonData[i][key] + "\t")},`
     }
     str += "\n"
   }
@@ -464,13 +588,19 @@ function tableToExcel(jsonData) {
 }
 
 function icsmain(icase) {
-  let icsEventList
-  if (icase === 0) {
-    icsEventList = eventConstructor(stuScheduleGetTable())
-  } else if (icase === 1) {
-    icsEventList = eventConstructor(scheduleGetTable())
-  }
-  icsConstructor(icsEventList)
+  getSemesterCalendar(false)
+    .catch(() => null)
+    .then(() => {
+      let weekTable = buildWeekTable()
+      if (!weekTable) return
+      let icsEventList
+      if (icase === 0) {
+        icsEventList = eventConstructor(stuScheduleGetTable(), weekTable)
+      } else if (icase === 1) {
+        icsEventList = eventConstructor(scheduleGetTable(), weekTable)
+      }
+      icsConstructor(icsEventList)
+    })
 }
 
 function csvmain(icase) {
@@ -498,4 +628,3 @@ function jsonmain(icase) {
 }
 
 buttonGenerate()
-
