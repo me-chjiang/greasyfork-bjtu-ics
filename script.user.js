@@ -4,8 +4,6 @@
 // @version      1.5.1
 // @description  导出ics/csv/json格式的日程文件！ 💻支持多端同步！ 📝支持Excel编辑！ 📆支持导入各系统原生日历！
 // @author       ZiuChen
-// @updateURL    https://fastly.jsdelivr.net/gh/ZiuChen/userscript@main/src/userscript/BJTU-Schedule-ics-csvGenerator/generator.js
-// @downloadURL  https://fastly.jsdelivr.net/gh/ZiuChen/userscript@main/src/userscript/BJTU-Schedule-ics-csvGenerator/generator.js
 // @match        https://aa.bjtu.edu.cn/course_selection/courseselect/stuschedule/*
 // @match        https://aa.bjtu.edu.cn/course_selection/courseselecttask/schedule/
 // @require      https://fastly.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js
@@ -13,6 +11,8 @@
 // @icon         https://fastly.jsdelivr.net/gh/ZiuChen/ZiuChen@main/avatar.jpg
 // @grant        none
 // @license      MIT
+// @downloadURL https://update.greasyfork.org/scripts/430918/%E5%8C%97%E4%BA%A4%E5%A4%A7iCalender%E8%AF%BE%E8%A1%A8%E7%94%9F%E6%88%90.user.js
+// @updateURL https://update.greasyfork.org/scripts/430918/%E5%8C%97%E4%BA%A4%E5%A4%A7iCalender%E8%AF%BE%E8%A1%A8%E7%94%9F%E6%88%90.meta.js
 // ==/UserScript==
 
 "use strict"
@@ -498,3 +498,4 @@ function jsonmain(icase) {
 }
 
 buttonGenerate()
+
