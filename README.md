@@ -1,3 +1,8 @@
+> 本仓库 fork 自 [ZiuChen/userscript](https://github.com/ZiuChen/userscript) 中的
+> `src/userscript/BJTU-Schedule-ics-csvGenerator`（Greasy Fork [#430918](https://greasyfork.org/scripts/430918)），
+> 原作者 [ZiuChen](https://github.com/ZiuChen)，以 MIT 协议发布。原作者的提交历史保留在本仓库中，
+> 每个上游提交都带有 `Upstream-Commit:` 指向原仓库对应提交。
+
 ## 北交大iCalender课表生成
 
 ### 脚本功能：
