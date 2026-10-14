@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         北交大iCalender课表生成
 // @namespace    https://github.com/ZiuChen/userscript
-// @version      1.6.0
+// @version      1.6.1
 // @description  导出ics/csv/json格式的日程文件！ 💻支持多端同步！ 📝支持Excel编辑！ 📆支持导入各系统原生日历！
 // @author       ZiuChen, ChJiang-ME
 // @match        https://aa.bjtu.edu.cn/course_selection/courseselect/stuschedule/*
@@ -37,6 +37,18 @@ const STANDARD_TIME_TABLE = [
   ["21:00", "21:50"]
 ]
 
+// 错峰上课：以下教学楼第二节（及其他节次）的上下课时间与标准时间不同
+const DELAY_CLASSROOMS = ["思源西楼", "逸夫"]
+const DELAY_TIME_TABLE = [
+  ["08:00", "09:50"],
+  ["10:30", "12:20"],
+  ["12:10", "14:00"],
+  ["14:10", "16:00"],
+  ["16:20", "18:10"],
+  ["19:00", "20:50"],
+  ["21:00", "21:50"]
+]
+
 function buttonGenerate() {
   $(".widget-title").append(/* html */ `
         <button id="scheduleIcsGenerate" class="btn btn-white btn-xs">导出为ics文件</button>
@@ -64,14 +76,15 @@ function bindEvents() {
     // 选课课表
     pageFlag = 1
   }
+  // 导出流程里任何一步抛错都要让用户看见，而不是"点了按钮没反应"
   $("#scheduleIcsGenerate").click(() => {
-    icsmain(pageFlag)
+    runExport("导出为ics文件", () => icsmain(pageFlag))
   })
   $("#csvGenerate").click(() => {
-    csvmain(pageFlag)
+    runExport("导出为csv文件", () => csvmain(pageFlag))
   })
   $("#jsonGenerate").click(() => {
-    jsonmain(pageFlag)
+    runExport("导出为json文件", () => jsonmain(pageFlag))
   })
   $("#restoreSetting").click(() => {
     OWNED_STORAGE_KEYS.forEach((key) => localStorage.removeItem(key))
@@ -157,15 +170,43 @@ function fetchSemesterCalendar() {
 // 24小时内优先用缓存，避免每次点击都请求校历页面
 function getSemesterCalendar(forceRefresh) {
   if (!forceRefresh) {
-    let cacheRaw = localStorage.getItem("semesterCalendarCache")
-    if (cacheRaw) {
-      let cache = JSON.parse(cacheRaw)
-      if (Date.now() - cache.fetchedAt < 24 * 60 * 60 * 1000) {
-        return Promise.resolve(cache)
-      }
+    let cache = readCalendarCache()
+    if (cache && Date.now() - cache.fetchedAt < 24 * 60 * 60 * 1000) {
+      return Promise.resolve(cache)
     }
   }
   return fetchSemesterCalendar()
+}
+
+// 安全读取校历缓存：内容损坏时只丢弃缓存并继续，而不是让脚本整体崩掉
+function readCalendarCache() {
+  let raw = localStorage.getItem("semesterCalendarCache")
+  if (!raw) return null
+  try {
+    let cache = JSON.parse(raw)
+    if (!cache || !Array.isArray(cache.semesters)) throw new Error("缓存结构异常")
+    return cache
+  } catch (e) {
+    console.warn("[课表导出] 校历缓存已损坏，已丢弃：" + e.message)
+    localStorage.removeItem("semesterCalendarCache")
+    return null
+  }
+}
+
+// 统一兜住导出流程中的异常，保证失败时用户能看到原因
+function runExport(label, fn) {
+  try {
+    let result = fn()
+    if (result && typeof result.catch === "function") {
+      result.catch((err) => {
+        console.error("[课表导出] " + label + "失败", err)
+        alert(label + "失败：" + (err && err.message ? err.message : err))
+      })
+    }
+  } catch (err) {
+    console.error("[课表导出] " + label + "失败", err)
+    alert(label + "失败：" + (err && err.message ? err.message : err))
+  }
 }
 
 function populateSemesterSelect(cache) {
@@ -184,8 +225,7 @@ function populateSemesterSelect(cache) {
 // 优先用当前选中学期从校历抓到的精确日期（自动跳过放假整周，无偏移）；
 // 校历数据不可用时，回退到旧的"起始周一 + 7×N天"线性推算
 function buildWeekTable() {
-  let cacheRaw = localStorage.getItem("semesterCalendarCache")
-  let cache = cacheRaw ? JSON.parse(cacheRaw) : null
+  let cache = readCalendarCache()
   let selectedId = $("#semesterSelect").val()
   let semester = cache && cache.semesters.find((s) => String(s.id) === String(selectedId))
 
@@ -203,9 +243,18 @@ function buildWeekTable() {
     return table
   }
 
+  // 兜底：线性推算。这条路径无法跳过整周放假，且默认值可能早已过期，必须明确提示用户
   let startMondayString = $("#startMonday").val()
   if (validCheck(startMondayString) === false) return null
-  const startMonday = new Date(startMondayString)
+  let startMonday = new Date(startMondayString)
+  if (Math.abs(Date.now() - startMonday.getTime()) > 180 * 24 * 60 * 60 * 1000) {
+    alert(
+      "未能从校历获取教学周日期，正在按“起始周一 " +
+        startMondayString +
+        "”线性推算。\n该日期距今天超过半年，很可能是过期的默认值，导出的日期会整体错位。\n" +
+        "建议先点击“刷新校历”，或在“起始周一”输入框中填写本学期第一个教学周的周一。"
+    )
+  }
   let table = {}
   for (let i = 0; i < 30; i++) {
     let days = []
@@ -223,10 +272,9 @@ function validCheck(startMondayString) {
   const re = new RegExp(/^\d{4}-\d{1,2}-\d{1,2}/)
   if (re.test(startMondayString) === false) {
     alert("输入日期值非法，请重新输入。")
-    throw Error("输入日期值非法")
-  } else {
-    return true
+    return false
   }
+  return true
 }
 
 function tableTransfer(rowTable) {
@@ -295,43 +343,71 @@ function dateStr2Arr(dateStr) {
 // teacher: "卜伟"
 // weekNum: 6
 
+// 把页面上的周次文本解析成 { initInfo, date }。
+// 支持 "第03-06周"、"第5周"、"第3,5,7周"、"第1-16周(单)"、"第1-16周（双周）" 等写法。
+// 尾部的单/双周标记以前会被 substring 直接截掉，导致单双周课程被导出成每周都有
+function parseWeekSpec(rawText) {
+  let text = String(rawText == null ? "" : rawText).replace(/[\s\u3000]/g, "")
+  let markerText = ""
+  if (/单/.test(text)) markerText = "单"
+  else if (/双/.test(text)) markerText = "双"
+
+  let weekEnd = text.indexOf("周")
+  let weekStart = text.indexOf("第")
+  let body
+  if (weekEnd !== -1 && (weekStart === -1 || weekEnd > weekStart)) {
+    body = text.substring(weekStart + 1, weekEnd)
+  } else {
+    body = text.replace(/[（(][^）)]*[）)]/g, "")
+  }
+
+  let weeks = dateStr2Arr(body)
+  if (markerText === "单") weeks = weeks.filter((w) => w % 2 === 1)
+  else if (markerText === "双") weeks = weeks.filter((w) => w % 2 === 0)
+
+  let initInfo = "第" + body + "周" + (markerText ? "(" + markerText + ")" : "")
+  if (weeks.length === 0) {
+    console.warn(`[课表导出] 周次文本 "${rawText}" 未解析出任何教学周`)
+  }
+  return { initInfo: initInfo, date: weeks }
+}
+
 function stuScheduleGetTable() {
   let courseListTmp = tableTransfer($("tr>td[style!='height:80px;']"))
   let courseList = []
   let courseTmp = {}
   for (let i = 0; i < 7; i++) {
     for (let j = 0; j < 7; j++) {
-      for (
-        let k = 0;
-        k < courseListTmp[i][j].querySelectorAll('span[style="color:#000"]').length;
-        k++
-      ) {
+      let cell = courseListTmp[i][j]
+      if (!cell) continue
+      let nameNodes = cell.querySelectorAll('span[style="color:#000"]')
+      let locationNodes = cell.querySelectorAll('span[class="text-muted"]')
+      let dateNodes = cell.querySelectorAll('div[style="max-width:120px;"]')
+      let teacherNodes = cell.querySelectorAll("i")
+      for (let k = 0; k < nameNodes.length; k++) {
+        // 各字段是按索引一一对应的，页面结构一旦不齐就跳过该条，而不是整体抛错
+        if (!nameNodes[k] || !locationNodes[k] || !dateNodes[k]) {
+          console.warn("[课表导出] 课表单元格结构与预期不符，已跳过一条课程记录")
+          continue
+        }
         courseTmp.weekNum = i + 1
         courseTmp.courseNum = j + 1
-        if (courseListTmp[i][j].querySelectorAll('span[style="color:#000"]')[k]) {
-          courseTmp.name = courseListTmp[i][j]
-            .querySelectorAll('span[style="color:#000"]')
-            [k].innerText.split("[本")[0]
-          courseTmp.location = courseListTmp[i][j].querySelectorAll('span[class="text-muted"]')[
-            k
-          ].innerText
-          let dateStr = courseListTmp[i][j].querySelectorAll('div[style="max-width:120px;"]')[k]
-            .innerText
-          dateStr = dateStr.substring(dateStr.indexOf("第") + 1, dateStr.indexOf("周")) // 预处理
-          courseTmp.initInfo = "第" + dateStr + "周"
-          courseTmp.date = dateStr2Arr(dateStr)
-          courseTmp.teacher = courseListTmp[i][j].querySelectorAll("i")[k].innerText
-          courseTmp.allInfo =
-            courseTmp.name +
-            " " +
-            courseTmp.initInfo +
-            " " +
-            courseTmp.location +
-            " " +
-            courseTmp.teacher
-          courseList.push(courseTmp)
-          courseTmp = {}
-        }
+        courseTmp.name = nameNodes[k].innerText.split("[本")[0]
+        courseTmp.location = locationNodes[k].innerText
+        let weekSpec = parseWeekSpec(dateNodes[k].innerText)
+        courseTmp.initInfo = weekSpec.initInfo
+        courseTmp.date = weekSpec.date
+        courseTmp.teacher = teacherNodes[k] ? teacherNodes[k].innerText : ""
+        courseTmp.allInfo =
+          courseTmp.name +
+          " " +
+          courseTmp.initInfo +
+          " " +
+          courseTmp.location +
+          " " +
+          courseTmp.teacher
+        courseList.push(courseTmp)
+        courseTmp = {}
       }
     }
   }
@@ -344,83 +420,68 @@ function scheduleGetTable() {
   let courseTmp = {}
   for (let i = 0; i < 7; i++) {
     for (let j = 0; j < 7; j++) {
-      for (
-        let k = 0;
-        k < courseListTmp[i][j].querySelectorAll('div[style="max-width:120px;"]').length;
-        k++
-      ) {
+      let cell = courseListTmp[i][j]
+      if (!cell) continue
+      let spanNodes = cell.getElementsByTagName("span")
+      let locationNodes = cell.querySelectorAll('span[class="text-muted"]')
+      let dateNodes = cell.querySelectorAll('div[style="max-width:120px;"]')
+      let teacherNodes = cell.querySelectorAll("i")
+      for (let k = 0; k < dateNodes.length; k++) {
+        if (!spanNodes[k * 3] || !locationNodes[k] || !dateNodes[k]) {
+          console.warn("[课表导出] 课表单元格结构与预期不符，已跳过一条课程记录")
+          continue
+        }
         courseTmp.weekNum = i + 1
         courseTmp.courseNum = j + 1
-        if (courseListTmp[i][j].querySelectorAll("span")[k]) {
-          courseTmp.name = courseListTmp[i][j]
-            .getElementsByTagName("span")
-            [k * 3].innerText.split("\n")[1]
-          courseTmp.location = courseListTmp[i][j].querySelectorAll('span[class="text-muted"]')[
-            k
-          ].innerText
-          let dateStr = courseListTmp[i][j].querySelectorAll('div[style="max-width:120px;"]')[k]
-            .innerText
-          dateStr = dateStr.substring(dateStr.indexOf("第") + 1, dateStr.indexOf("周")) // 预处理
-          courseTmp.initInfo = "第" + dateStr + "周"
-          courseTmp.date = dateStr2Arr(dateStr)
-          courseTmp.teacher = courseListTmp[i][j].querySelectorAll("i")[k]?.innerText || ""
-          courseTmp.allInfo =
-            courseTmp.name +
-            " " +
-            courseTmp.initInfo +
-            " " +
-            courseTmp.location +
-            " " +
-            courseTmp.teacher
-          courseList.push(courseTmp)
-          courseTmp = {}
-        }
+        courseTmp.name = spanNodes[k * 3].innerText.split("\n")[1] || ""
+        courseTmp.location = locationNodes[k].innerText
+        let weekSpec = parseWeekSpec(dateNodes[k].innerText)
+        courseTmp.initInfo = weekSpec.initInfo
+        courseTmp.date = weekSpec.date
+        courseTmp.teacher = teacherNodes[k] ? teacherNodes[k].innerText : ""
+        courseTmp.allInfo =
+          courseTmp.name +
+          " " +
+          courseTmp.initInfo +
+          " " +
+          courseTmp.location +
+          " " +
+          courseTmp.teacher
+        courseList.push(courseTmp)
+        courseTmp = {}
       }
     }
   }
   return courseList
 }
 
-function timeConstructor(weekTable, weekTh, weekNum, courseNum, isStamp, isDelay) {
-  let delayTimeTable = [
-    ["08:00", "09:50"],
-    ["10:30", "12:20"],
-    ["12:10", "14:00"],
-    ["14:10", "16:00"],
-    ["16:20", "18:10"],
-    ["19:00", "20:50"],
-    ["21:00", "21:50"]
-  ]
+function timeConstructor(weekTable, weekTh, weekNum, courseNum, isStamp, locationStr) {
+  let location = locationStr == null ? "" : String(locationStr)
+  let isDelayed = DELAY_CLASSROOMS.some((item) => location.search(item) != -1)
+  let timeTable = isDelayed ? DELAY_TIME_TABLE : STANDARD_TIME_TABLE
 
-  let DayTime = new Date(weekTable[weekTh][weekNum - 1])
-  let rtnTime = []
+  let weekDays = weekTable ? weekTable[weekTh] : null
+  let dayTime = weekDays ? weekDays[weekNum - 1] : null
+  let period = timeTable[courseNum - 1]
+  if (!dayTime || !period) return null // 该教学周不在校历数据里，由调用方跳过
+
+  let DayTime = new Date(dayTime)
   let startTimeStamp, endTimeStamp
 
-  let isDelayed = ["思源西楼", "逸夫"].some((item) => isDelay.search(item) != -1)
-  let timeTable = isDelayed ? delayTimeTable : STANDARD_TIME_TABLE
-
   startTimeStamp = DayTime.setHours(
-    timeTable[courseNum - 1][0].split(":")[0],
-    timeTable[courseNum - 1][0].split(":")[1]
+    period[0].split(":")[0],
+    period[0].split(":")[1]
   )
   endTimeStamp = DayTime.setHours(
-    timeTable[courseNum - 1][1].split(":")[0],
-    timeTable[courseNum - 1][1].split(":")[1]
+    period[1].split(":")[0],
+    period[1].split(":")[1]
   )
 
   if (isStamp === 1) {
-    rtnTime.push(startTimeStamp)
-    rtnTime.push(endTimeStamp)
-    return rtnTime
+    return [startTimeStamp, endTimeStamp]
   }
 
-  let startTime = new Date(startTimeStamp)
-  let endTime = new Date(endTimeStamp)
-  startTime = startTime.toString()
-  endTime = endTime.toString()
-  rtnTime.push(startTime)
-  rtnTime.push(endTime)
-  return rtnTime
+  return [new Date(startTimeStamp).toString(), new Date(endTimeStamp).toString()]
 }
 
 function icsConstructor(icsEventList) {
@@ -440,8 +501,8 @@ function icsConstructor(icsEventList) {
 }
 
 function eventConstructor(courseList, weekTable) {
-  let icsEvent = {}
   let icsEventList = []
+  let skipped = 0
   for (let i = 0; i < courseList.length; i++) {
     for (let j = 0; j < courseList[i].date.length; j++) {
       let timeRst = timeConstructor(
@@ -460,99 +521,51 @@ function eventConstructor(courseList, weekTable) {
         1,
         courseList[i].location
       )
-      icsEvent.name = courseList[i].name
-      icsEvent.description =
-        courseList[i].location +
-        " " +
-        courseList[i].initInfo +
-        " 任课教师：" +
-        courseList[i].teacher
-      icsEvent.location = courseList[i].location
-      icsEvent.startTime = timeRst[0]
-      icsEvent.endTime = timeRst[1]
-      icsEvent.startTimeStamp = timeRstStamp[0]
-      icsEvent.endTimeStamp = timeRstStamp[1]
-      icsEventList.push(icsEvent)
-      icsEvent = {}
+      if (!timeRst || !timeRstStamp) {
+        skipped++
+        console.warn(
+          `[课表导出] 跳过无法定位日期的课程：${courseList[i].name} ${courseList[i].initInfo}（第${courseList[i].date[j]}教学周不在校历数据中）`
+        )
+        continue
+      }
+      icsEventList.push({
+        name: courseList[i].name,
+        description:
+          courseList[i].location +
+          " " +
+          courseList[i].initInfo +
+          " 任课教师：" +
+          courseList[i].teacher,
+        location: courseList[i].location,
+        startTime: timeRst[0],
+        endTime: timeRst[1],
+        startTimeStamp: timeRstStamp[0],
+        endTimeStamp: timeRstStamp[1]
+      })
     }
   }
-  return icsEventList
+  return { events: icsEventList, skipped: skipped }
 }
 
 function toExcelFormatter(courseList) {
-  let jsonData = [
-    {
-      column1: "",
-      column2: "",
-      column3: "",
-      column4: "",
-      column5: "",
-      column6: "",
-      column7: ""
-    },
-    {
-      column1: "",
-      column2: "",
-      column3: "",
-      column4: "",
-      column5: "",
-      column6: "",
-      column7: ""
-    },
-    {
-      column1: "",
-      column2: "",
-      column3: "",
-      column4: "",
-      column5: "",
-      column6: "",
-      column7: ""
-    },
-    {
-      column1: "",
-      column2: "",
-      column3: "",
-      column4: "",
-      column5: "",
-      column6: "",
-      column7: ""
-    },
-    {
-      column1: "",
-      column2: "",
-      column3: "",
-      column4: "",
-      column5: "",
-      column6: "",
-      column7: ""
-    },
-    {
-      column1: "",
-      column2: "",
-      column3: "",
-      column4: "",
-      column5: "",
-      column6: "",
-      column7: ""
-    },
-    {
-      column1: "",
-      column2: "",
-      column3: "",
-      column4: "",
-      column5: "",
-      column6: "",
-      column7: ""
-    }
-  ]
   let charArr = ["第一节", "第二节", "第三节", "第四节", "第五节", "第六节", "第七节"]
+  // column1 是"节次"标签，column2~column8 对应周一~周日。
+  // 以前只有 column1~column7，最后一周（周日）的课程会被写进名为 "undefined" 的键，导致 CSV 多出一列
+  let jsonData = []
+  for (let i = 0; i < 7; i++) {
+    let row = {
+      column1: charArr[i] + " [" + STANDARD_TIME_TABLE[i][0] + " - " + STANDARD_TIME_TABLE[i][1] + "]"
+    }
+    for (let j = 0; j < 7; j++) {
+      row["column" + (j + 2)] = ""
+    }
+    jsonData.push(row)
+  }
   let objKeys = Object.keys(jsonData[0])
 
   for (let i = 0; i < 7; i++) {
     for (let j = 0; j < 7; j++) {
-      let tmpKey = objKeys[j + 1]
-      jsonData[i].column1 =
-        charArr[i] + " [" + STANDARD_TIME_TABLE[i][0] + " - " + STANDARD_TIME_TABLE[i][1] + "]"
+      let tmpKey = objKeys[j + 1] // column2~column8
       for (let k = 0; k < courseList.length; k++) {
         if (courseList[k].courseNum == i + 1 && courseList[k].weekNum == j + 1) {
           jsonData[i][tmpKey] = jsonData[i][tmpKey] + "  " + courseList[k].allInfo
@@ -571,15 +584,20 @@ function csvEscape(field) {
   return field
 }
 
+// 拼出 CSV 文本（与下载动作分离，便于单独验证）
+function buildCsvString(jsonData) {
+  let lines = ["课程|星期,星期一,星期二,星期三,星期四,星期五,星期六,星期日"]
+  for (let i = 0; i < jsonData.length; i++) {
+    // 用 join 拼行，避免旧实现在每行末尾多留一个逗号（会多出一个空列）
+    let cells = Object.keys(jsonData[i]).map((key) => csvEscape(jsonData[i][key] + "\t"))
+    lines.push(cells.join(","))
+  }
+  return lines.join("\n") + "\n"
+}
+
 // tableToExcel() @csdn hhzzcc_
 function tableToExcel(jsonData) {
-  let str = `课程|星期,星期一,星期二,星期三,星期四,星期五,星期六,星期日\n`
-  for (let i = 0; i < jsonData.length; i++) {
-    for (let key in jsonData[i]) {
-      str += `${csvEscape(jsonData[i][key] + "\t")},`
-    }
-    str += "\n"
-  }
+  const str = buildCsvString(jsonData)
   const uri = "data:text/csv;charset=utf-8,\ufeff" + encodeURIComponent(str)
   const link = document.createElement("a")
   link.href = uri
@@ -588,39 +606,53 @@ function tableToExcel(jsonData) {
 }
 
 function icsmain(icase) {
-  getSemesterCalendar(false)
-    .catch(() => null)
+  return getSemesterCalendar(false)
+    .catch((err) => {
+      console.warn("[课表导出] 校历获取失败，将尝试其它日期来源：" + err.message)
+      return null
+    })
     .then(() => {
       let weekTable = buildWeekTable()
       if (!weekTable) return
-      let icsEventList
+      let courseList
       if (icase === 0) {
-        icsEventList = eventConstructor(stuScheduleGetTable(), weekTable)
+        courseList = stuScheduleGetTable()
       } else if (icase === 1) {
-        icsEventList = eventConstructor(scheduleGetTable(), weekTable)
+        courseList = scheduleGetTable()
+      } else {
+        courseList = []
       }
-      icsConstructor(icsEventList)
+      let result = eventConstructor(courseList, weekTable)
+      if (result.events.length === 0) {
+        alert("没有解析到任何可导出的课程，请确认当前页面是课表页面，并检查校历/起始周一的设置。")
+        return
+      }
+      icsConstructor(result.events)
+      if (result.skipped > 0) {
+        alert(
+          `已成功导出 ${result.events.length} 条日程，另有 ${result.skipped} 条课程因所在教学周不在校历数据中而被跳过。\n` +
+            "如果数量偏多，请确认上方选择的学期是否正确。"
+        )
+      }
     })
 }
 
 function csvmain(icase) {
-  let jsonData
-  if (icase === 0) {
-    jsonData = toExcelFormatter(stuScheduleGetTable())
-  } else if (icase === 1) {
-    jsonData = toExcelFormatter(scheduleGetTable())
+  let courseList = icase === 0 ? stuScheduleGetTable() : icase === 1 ? scheduleGetTable() : []
+  if (courseList.length === 0) {
+    alert("没有解析到任何课程，请确认当前页面是课表页面。")
+    return
   }
-  tableToExcel(jsonData)
+  tableToExcel(toExcelFormatter(courseList))
 }
 
 function jsonmain(icase) {
-  let jsonData
-  if (icase === 0) {
-    jsonData = stuScheduleGetTable()
-  } else if (icase === 1) {
-    jsonData = scheduleGetTable()
+  let courseList = icase === 0 ? stuScheduleGetTable() : icase === 1 ? scheduleGetTable() : []
+  if (courseList.length === 0) {
+    alert("没有解析到任何课程，请确认当前页面是课表页面。")
+    return
   }
-  const uri = "data:text/json;charset=utf-8,\ufeff" + encodeURIComponent(JSON.stringify(jsonData))
+  const uri = "data:text/json;charset=utf-8,\ufeff" + encodeURIComponent(JSON.stringify(courseList))
   const link = document.createElement("a")
   link.href = uri
   link.download = "课程表.json"
