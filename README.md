@@ -1,9 +1,16 @@
-> 本仓库 fork 自 [ZiuChen/userscript](https://github.com/ZiuChen/userscript) 中的
-> `src/userscript/BJTU-Schedule-ics-csvGenerator`（Greasy Fork [#430918](https://greasyfork.org/scripts/430918)），
-> 原作者 [ZiuChen](https://github.com/ZiuChen)，以 MIT 协议发布。原作者的提交历史保留在本仓库中，
-> 每个上游提交都带有 `Upstream-Commit:` 指向原仓库对应提交。
+# 北交大iCalender课表生成
 
-## 北交大iCalender课表生成
+北京交通大学教务系统课表导出油猴脚本：在"本学期课表"/"选课课表"页面一键把课表导出为 ICS（日历）、CSV（Excel）或 JSON，并根据学校校历自动计算每节课的准确日期。
+
+## 来源与声明
+
+本项目基于 [ZiuChen](https://github.com/ZiuChen) 的 [北交大iCalender课表生成](https://greasyfork.org/scripts/430918)（源码位于 [ZiuChen/userscript](https://github.com/ZiuChen/userscript) 的 `src/userscript/BJTU-Schedule-ics-csvGenerator`）修改而来，原脚本以 MIT 协议发布，本项目沿用 MIT 协议，见 [LICENSE](LICENSE)。
+
+- 原作者的提交历史保留在本仓库中，每个上游提交都带有 `Upstream-Commit:` 指向原仓库对应提交。
+- 本项目在原脚本基础上修复了若干 bug（周次解析、CSV 生成、导出路径等），并新增了自动抓取校历计算准确日期的功能。
+- 本项目与原作者无隶属关系；原脚本的问题请反馈给原作者，本项目引入的问题请在[本仓库](https://github.com/me-chjiang/greasyfork-bjtu-ics/issues)提交。
+
+## 使用说明
 
 ### 脚本功能：
 
@@ -12,10 +19,6 @@
 * 一键将课表导出为.csv文件，可以在Excel中编辑。 
 * 一键将课表导出为.json文件，可以导入第三方软件。 
 * 自动从学校[校历页面](https://bksy.bjtu.edu.cn/Semester.html)获取每个教学周的准确日期，学期中间的整周放假会自动跳过，不再需要手工推算。
-
-### 使用效果：
-
-![](./image.png)
 
 ### 使用方法：
 
@@ -32,20 +35,10 @@
 
 错峰上课：在**思源西楼** 与 **逸夫教学楼**的部分节次上下课时间与标准时间不同，脚本会对这些教学楼使用另一套时间表（源码中的 `DELAY_CLASSROOMS` 与 `DELAY_TIME_TABLE`）。具体时间以开学时教务处公布为准，需要调整时修改这两个常量即可；`DELAY_CLASSROOMS` 为空数组时，所有日程都按标准时间导出。
 
-CSV 导出是"节次 × 星期"的周视图，行标签固定为标准上课时间；错峰教学楼课程的实际时间只在 ICS 中体现，这是目前已知的局限（见 [ISSUES.md](ISSUES.md) 待处理项 A）。
+CSV 导出是"节次 × 星期"的周视图，行标签固定为标准上课时间；错峰教学楼课程的实际时间只在 ICS 中体现，这是目前已知的局限（见 [todo.md](todo.md)）。
 
 目前仅对本科生 "选课课表" 与 "本学期课表" 两个网页做了支持，研究生选课界面尚未测试。
 
-### 开发与测试：
-
-```bash
-node test/run-tests.js
-```
-
-测试脚本无第三方依赖：既用文本提取的方式把 `script.user.js` 中的纯函数（周次解析、上课时间计算、ICS 事件生成、CSV 生成）取出来做回归验证，也用 stub 的浏览器环境把整个脚本求值一遍，确认没有引用错误、异常提示路径正常。已知问题与处理状态记录在 [ISSUES.md](ISSUES.md)，后续计划见 [todo.md](todo.md)。
-
 ### 后续开发计划：
 
-支持自定义日程描述部分格式；
-
-使用过程中如遇到任何问题，欢迎到[脚本主页](https://greasyfork.org/zh-CN/scripts/430918)或[Github](https://github.com/ZiuChen/userscript)提交建议！
+见 [todo.md](todo.md)。
